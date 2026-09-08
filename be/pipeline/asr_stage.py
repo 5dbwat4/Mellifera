@@ -65,7 +65,7 @@ def main():
 
     asr = FireRedAsr2.from_pretrained(
         "llm", "/opt/models/FireRedASR2-LLM",
-        FireRedAsr2Config(use_gpu=True, decode_min_len=0, repetition_penalty=3.0,
+        FireRedAsr2Config(use_gpu=True, use_half=True, decode_min_len=0, repetition_penalty=3.0,
                           llm_length_penalty=1.0, temperature=1.0))
     import soundfile as sf
     import torch

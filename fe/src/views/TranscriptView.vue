@@ -23,6 +23,8 @@ const STEP_LABELS: Record<string, string> = {
 
 const job = ref<Task | null>(null)
 const error = ref('')
+// SSE 断线中：EventSource 自动重连，连上后清除；不做快照兜底
+const connectionLost = ref(false)
 let es: EventSource | null = null
 
 const running = computed(() => job.value?.status === 'queued' || job.value?.status === 'running')
@@ -53,13 +55,13 @@ function closeSse() {
 }
 
 // 订阅任务的 SSE 事件流：连上即收当前状态，此后每次变化推一条，
-// 任务进入终态后服务端会主动关闭流
+// 任务进入终态后服务端会主动关闭流。断线时 EventSource 自动重连，
+// 重连后服务端会先推一次当前状态，等于自动续上。
 function listen() {
   closeSse()
   es = new EventSource(taskEventsUrl(job.value!.taskId))
-  let failures = 0
   es.onopen = () => {
-    failures = 0
+    connectionLost.value = false
   }
   es.onmessage = (ev) => {
     try {
@@ -70,19 +72,7 @@ function listen() {
     if (job.value.status === 'done' || job.value.status === 'error') closeSse()
   }
   es.onerror = () => {
-    // 后端重启/网络抖动时 EventSource 会自动重连；连续失败则拉快照兜底
-    failures++
-    if (failures >= 3) {
-      closeSse()
-      api
-        .getTask(job.value!.taskId)
-        .then((t) => {
-          job.value = t
-        })
-        .catch(() => {
-          error.value = '与任务的实时连接已中断，请刷新页面重试'
-        })
-    }
+    connectionLost.value = true
   }
 }
 
@@ -132,7 +122,10 @@ onUnmounted(closeSse)
         <div
           class="mx-auto mb-4 h-8 w-8 animate-spin rounded-full border-4 border-indigo-200 border-t-indigo-600"
         />
-        <p class="font-medium text-indigo-900">{{ stepText }}</p>
+        <p class="font-medium text-indigo-900">
+          <span v-if="connectionLost" class="text-indigo-400">&lt;connection interrupted&gt;</span>
+          <template v-else>{{ stepText }}</template>
+        </p>
         <p class="mt-1 text-sm text-indigo-500">{{ job.detail }}</p>
         <div v-if="percent !== null" class="mx-auto mt-4 h-2 max-w-md overflow-hidden rounded-full bg-indigo-100">
           <div class="h-full rounded-full bg-indigo-500 transition-all" :style="{ width: percent + '%' }" />

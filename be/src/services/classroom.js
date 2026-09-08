@@ -2,6 +2,8 @@ import fs from 'node:fs'
 
 import { CLASSROOM, ZJUAM } from 'login-zju'
 
+import { cacheSessions, getCachedSessions } from '../db.js'
+
 // 智云课堂接口（用法与 ZJU-live-better/classroom.zju 一致）
 const COURSE_LIST_URL =
   'https://education.cmc.zju.edu.cn/personal/courseapi/vlabpassportapi/v1/account-profile/course'
@@ -79,16 +81,30 @@ function toSession(v) {
   }
 }
 
-// 课节目录：不限于自己的课程，只要智云课堂存在该 courseId 即可
+// 课节目录：不限于自己的课程，只要智云课堂存在该 courseId 即可。
+// 访问过一次的"已生成回放"课节会缓存进 SQLite（subId 主键）；
+// 上游不可用时回退返回缓存。
 export async function fetchCourseSessions(courseId) {
-  const res = await authedJson(`${CATALOGUE_URL}?course_id=${courseId}`)
-  const sessions = res.result?.data
-  if (!Array.isArray(sessions)) {
-    const err = new Error(res.message || `智云课堂没有返回课程 ${courseId} 的课节数据`)
-    err.status = 502
-    throw err
+  let items
+  try {
+    const res = await authedJson(`${CATALOGUE_URL}?course_id=${courseId}`)
+    const sessions = res.result?.data
+    if (!Array.isArray(sessions)) {
+      const err = new Error(res.message || `智云课堂没有返回课程 ${courseId} 的课节数据`)
+      err.status = 502
+      throw err
+    }
+    items = sessions.map(toSession).sort((a, b) => b.startAt - a.startAt)
+    try {
+      cacheSessions(courseId, items)
+    } catch (e) {
+      console.warn('[CACHE] 课节缓存写入失败:', e.message)
+    }
+  } catch (e) {
+    const cached = getCachedSessions(courseId)
+    if (cached.length) return { courseId, total: cached.length, items: cached, stale: true }
+    throw e
   }
-  const items = sessions.map(toSession).sort((a, b) => b.startAt - a.startAt)
   return { courseId, total: items.length, items }
 }
 

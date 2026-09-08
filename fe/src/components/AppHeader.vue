@@ -31,15 +31,6 @@ const navItems = [
           {{ item.label }}
         </RouterLink>
       </nav>
-
-      <div class="ml-auto flex items-center">
-        <span
-          class="flex h-8 w-8 items-center justify-center rounded-full bg-indigo-100 text-sm font-semibold text-indigo-700"
-          title="当前用户"
-        >
-          M
-        </span>
-      </div>
     </div>
   </header>
 </template>

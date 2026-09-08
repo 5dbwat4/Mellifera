@@ -7,6 +7,9 @@ fe/dist/
 # Transient debug output
 be/tmp/
 
+# Local sqlite cache
+be/data/
+
 # Misc
 .DS_Store
 

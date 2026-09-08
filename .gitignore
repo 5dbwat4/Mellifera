@@ -1,0 +1,11 @@
+# Node
+node_modules/
+fe/dist/
+*.log
+.env
+
+# Transient debug output
+be/tmp/
+
+# Misc
+.DS_Store

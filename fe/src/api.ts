@@ -59,7 +59,7 @@ export class ApiError extends Error {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response
   try {
-    res = await fetch(`/api${path}`, {
+    res = await fetch(`${import.meta.env.BASE_URL}api${path}`, {
       headers: { 'Content-Type': 'application/json' },
       ...init,
     })

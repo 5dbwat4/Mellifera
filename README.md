@@ -26,7 +26,7 @@ mellifera/
     │   ├── App.vue        # 布局（Header + RouterView）
     │   ├── style.css      # Tailwind 入口
     │   └── main.ts
-    └── vite.config.ts     # 端口 5180，代理 /api -> http://127.0.0.1:9000
+    └── vite.config.ts     # base=/mellifera/，端口 5180，代理 /mellifera/api -> http://127.0.0.1:9000
 ```
 
 ## 快速开始
@@ -51,7 +51,11 @@ npm install
 npm run dev
 ```
 
-浏览器访问 http://localhost:5180 ，"系统情况"页会实时检测后端在线状态。开发模式下 Vite 把 `/api` 请求代理到 `http://127.0.0.1:9000`，无需处理跨域；后端 CORS 也已按 5180 配置兜底。前端配置了 `strictPort: true`，端口被占时直接报错而不是自动换端口。
+浏览器访问 http://localhost:5180/mellifera/ （应用挂在 `/mellifera/` 子路径下，与服务器统一入口 nginx 的挂载一致）。开发模式下 Vite 把 `/mellifera/api` 请求去掉前缀后代理到 `http://127.0.0.1:9000`，无需处理跨域；后端 CORS 也已按 5180 配置兜底。前端配置了 `strictPort: true`，端口被占时直接报错而不是自动换端口。
+
+## 部署（服务器统一入口）
+
+服务器上所有项目统一走 nginx 的 8123 回环入口，本项目挂载在 `/mellifera/` 子路径：静态托管 `fe/dist`（构建时 `base: '/mellifera/'`），`/mellifera/api/` 反代到本机 9000。nginx location 配置见 `be/deploy/nginx-mellifera.conf`。
 
 ## 示例接口
 

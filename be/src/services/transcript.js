@@ -3,6 +3,13 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
+import {
+  getCachedSessionRow,
+  getLatestTaskRowBySub,
+  getTaskRow,
+  listTaskRows,
+  saveTask,
+} from '../db.js'
 import { downloadTo, fetchCourseSessions, fetchSessionPpt } from './classroom.js'
 
 const WORKDIR = process.env.TRANSCRIPT_WORKDIR || '/opt/test2/mellifera'
@@ -14,12 +21,15 @@ const SGLANG_BASE = process.env.SGLANG_BASE || 'http://127.0.0.1:8000'
 const SGLANG_MODEL = process.env.SGLANG_MODEL || 'Qwen3.8-27B-Uncensored-FP8'
 const PPT_MAX = Number(process.env.PPT_SELECT_MAX || 16)
 const ASR_MAX_SEGMENTS = Number(process.env.ASR_MAX_SEGMENTS || 0)
+const LOGS_MAX = 8000 // 日志尾巴上限，防止长任务把 DB 行撑爆
 
-// 同一课时复用同一任务；GPU 任务串行
-const jobsBySub = new Map()
-const jobsById = new Map()
+// GPU 任务串行
 const queue = []
 let running = false
+
+// 存活任务的内存对象（运行态）；SSE 订阅者按 taskId 登记
+const tasksById = new Map()
+const subscribers = new Map()
 
 function httpErr(status, message) {
   return Object.assign(new Error(message), { status })
@@ -30,40 +40,115 @@ const mmss = (sec) => {
   return `[${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}]`
 }
 
-function jobDir(job) {
-  return path.join(WORKDIR, `${job.courseId}_${job.subId}`)
+function jobDir(task) {
+  return path.join(WORKDIR, `${task.courseId}_${task.subId}`)
 }
 
-function persist(job) {
+function appendLog(task, line) {
+  const ts = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+  task.logs = `${task.logs}[${ts}] ${line}\n`.slice(-LOGS_MAX)
+}
+
+function notify(task) {
+  const snapshot = publicTask(task, task.status === 'done')
+  for (const fn of subscribers.get(task.taskId) || []) {
+    try {
+      fn(snapshot)
+    } catch {}
+  }
+}
+
+function update(task, patch) {
+  Object.assign(task, patch)
+  if (patch.detail !== undefined) appendLog(task, patch.detail)
   try {
-    fs.mkdirSync(jobDir(job), { recursive: true })
-    fs.writeFileSync(path.join(jobDir(job), 'job.json'), JSON.stringify(job, null, 2))
+    saveTask(task)
+  } catch (e) {
+    console.warn('[DB] 任务持久化失败:', e.message)
+  }
+  notify(task)
+}
+
+/** 对外 JSON 形态；withResult=true 时读取产物文件（仅 done 任务有意义） */
+function publicTask(task, withResult = false) {
+  const pub = {
+    taskId: task.taskId,
+    subId: task.subId,
+    courseId: task.courseId,
+    title: task.title,
+    videoUrl: task.videoUrl,
+    status: task.status,
+    stepId: task.stepId,
+    detail: task.detail,
+    progress: task.progress,
+    error: task.error,
+    logs: task.logs,
+    createdAt: task.createdAt,
+    finishedAt: task.finishedAt,
+    result: null,
+  }
+  if (withResult && task.status === 'done') pub.result = computeResult(task)
+  return pub
+}
+
+// done 任务的结果从磁盘产物拼出（transcript_final.md + blocks.json + ppt/ 目录）
+function computeResult(task) {
+  const dir = jobDir(task)
+  let markdown = ''
+  try {
+    markdown = fs.readFileSync(path.join(dir, 'transcript_final.md'), 'utf-8')
   } catch {}
+  let blocksCount = 0
+  try {
+    blocksCount = JSON.parse(fs.readFileSync(path.join(dir, 'blocks.json'), 'utf-8')).length
+  } catch {}
+  let pptCount = 0
+  try {
+    pptCount = fs
+      .readdirSync(path.join(dir, 'ppt'))
+      .filter((f) => f.endsWith('.jpg')).length
+  } catch {}
+  return { markdown, blocksCount, pptCount }
 }
 
-function update(job, patch) {
-  Object.assign(job, patch)
-  persist(job)
+// 从 DB 行重建任务对象（后端重启后的恢复路径）
+function restoreTask(row) {
+  const task = {
+    taskId: row.task_id,
+    subId: row.sub_id,
+    courseId: row.course_id,
+    title: row.title,
+    videoUrl: row.video_url,
+    logs: row.logs,
+    stepId: row.step_id,
+    status: row.status,
+    progress: row.progress ? JSON.parse(row.progress) : null,
+    detail: row.detail,
+    error: row.error,
+    resultFile: row.result_file,
+    createdAt: row.created_at,
+    finishedAt: row.finished_at,
+    result: null,
+  }
+  if (task.status !== 'error') tasksById.set(task.taskId, task)
+  return task
 }
 
-// Promise 化的子进程调用，失败时带 stderr 尾部
-function run(cmd, args) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args)
-    let errTail = ''
-    child.stderr.on('data', (d) => {
-      errTail = (errTail + d).slice(-4000)
-    })
-    child.on('error', reject)
-    child.on('close', (code) => {
-      if (code === 0) resolve()
-      else reject(httpErr(500, `${cmd} 退出码 ${code}\n${errTail.slice(-1200)}`))
-    })
-  })
+// ---------- SSE 订阅 ----------
+
+export function subscribe(taskId, fn) {
+  if (!subscribers.has(taskId)) subscribers.set(taskId, new Set())
+  subscribers.get(taskId).add(fn)
 }
+
+export function unsubscribe(taskId, fn) {
+  subscribers.get(taskId)?.delete(fn)
+}
+
+// ---------- 下载 / PPT / LLM 辅助 ----------
 
 // 下载回放视频，期间轮询文件大小更新 detail
-function downloadVideo(url, dest, job) {
+function downloadVideo(url, dest, task) {
   return new Promise((resolve, reject) => {
     const child = spawn('curl', ['-fSL', '--retry', '5', '--retry-all-errors', '-o', dest, url])
     let errTail = ''
@@ -73,7 +158,7 @@ function downloadVideo(url, dest, job) {
     const timer = setInterval(() => {
       try {
         const mb = fs.statSync(dest).size / 1e6
-        update(job, { detail: `已下载 ${mb.toFixed(0)} MB` })
+        update(task, { detail: `已下载 ${mb.toFixed(0)} MB` })
       } catch {}
     }, 3000)
     child.on('error', (e) => {
@@ -174,27 +259,25 @@ async function readSseContent(res) {
   return text.trim()
 }
 
-async function runJob(job) {
-  const dir = jobDir(job)
+// ---------- 流水线 ----------
+
+async function runTask(task) {
+  const dir = jobDir(task)
   fs.mkdirSync(dir, { recursive: true })
-  const setStep = (step, detail, progress = null) => update(job, { status: 'running', step, detail, progress })
+  const setStep = (stepId, detail, progress = null) =>
+    update(task, { status: 'running', stepId, detail, progress })
 
   try {
-    // 1. 解析课时
-    setStep('meta', '解析课时信息')
-    const { items } = await fetchCourseSessions(job.courseId)
-    const session = items.find((s) => s.subId === job.subId)
-    if (!session) throw httpErr(404, `课时 ${job.subId} 在课程 ${job.courseId} 中不存在`)
-    if (!session.playbackUrl) throw httpErr(400, '该课节没有回放视频，无法生成逐字稿')
-    update(job, { title: session.title })
+    // 1. 校验课时（videoUrl 已在创建时从缓存解析）
+    setStep('meta', `解析课时信息（课程 ${task.courseId}）`)
 
     // 2. 下载回放视频（已存在则跳过，支持断点续跑）
     setStep('download', '下载回放视频')
     const videoPath = path.join(dir, 'video.mp4')
     if (fs.existsSync(videoPath) && fs.statSync(videoPath).size > 1e6) {
-      update(job, { detail: `复用已下载的视频 (${(fs.statSync(videoPath).size / 1e6).toFixed(0)} MB)` })
+      update(task, { detail: `复用已下载的视频 (${(fs.statSync(videoPath).size / 1e6).toFixed(0)} MB)` })
     } else {
-      await downloadVideo(session.playbackUrl, videoPath, job)
+      await downloadVideo(task.videoUrl, videoPath, task)
     }
 
     // 3. 抽音频（已存在则跳过）
@@ -222,7 +305,7 @@ async function runJob(job) {
         try {
           const p = JSON.parse(fs.readFileSync(path.join(dir, 'progress.json'), 'utf-8'))
           if (p.step === 'asr' || p.step === 'punc') {
-            update(job, { step: p.step, progress: { done: p.done, total: p.total }, detail: p.detail })
+            update(task, { stepId: p.step, progress: { done: p.done, total: p.total }, detail: p.detail })
           }
         } catch {}
       }, 3000)
@@ -239,7 +322,7 @@ async function runJob(job) {
 
     // 5. PPT 列表 + 适当选择 + 下载
     setStep('ppt', `获取 PPT 列表并筛选（上限 ${PPT_MAX} 张）`)
-    const pptList = await fetchSessionPpt(job.courseId, job.subId)
+    const pptList = await fetchSessionPpt(task.courseId, task.subId)
     const selected = selectPpt(pptList, PPT_MAX)
     const pptDir = path.join(dir, 'ppt')
     fs.mkdirSync(pptDir, { recursive: true })
@@ -247,24 +330,25 @@ async function runJob(job) {
       const file = path.join(pptDir, `ppt_${String(i + 1).padStart(2, '0')}.jpg`)
       await downloadTo(selected[i].url, file)
       selected[i].file = file
-      update(job, { detail: `下载 PPT ${i + 1}/${selected.length}` })
+      update(task, { detail: `下载 PPT ${i + 1}/${selected.length}` })
     }
 
     // 6. LLM 生成逐字稿（文本片段 + PPT 图进上下文）
     setStep('llm', `SGLang 生成逐字稿（${selected.length} 张 PPT 进上下文）`)
     const blocks = JSON.parse(fs.readFileSync(path.join(dir, 'blocks.json'), 'utf-8'))
     const markdown = await generateTranscript(blocks, selected)
-    fs.writeFileSync(path.join(dir, 'transcript_final.md'), markdown)
+    const resultFile = path.join(dir, 'transcript_final.md')
+    fs.writeFileSync(resultFile, markdown)
 
-    update(job, {
+    update(task, {
       status: 'done',
-      step: 'done',
+      stepId: 'done',
       detail: '完成',
+      resultFile,
       finishedAt: Date.now(),
-      result: { markdown, blocksCount: blocks.length, pptCount: selected.length },
     })
   } catch (e) {
-    update(job, {
+    update(task, {
       status: 'error',
       error: e.message?.slice(0, 2000) || String(e),
       finishedAt: Date.now(),
@@ -275,52 +359,86 @@ async function runJob(job) {
   }
 }
 
-function runNext() {
-  if (running || queue.length === 0) return
-  const job = queue.shift()
-  running = true
-  runJob(job)
+// Promise 化的子进程调用，失败时带 stderr 尾部
+function run(cmd, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args)
+    let errTail = ''
+    child.stderr.on('data', (d) => {
+      errTail = (errTail + d).slice(-4000)
+    })
+    child.on('error', reject)
+    child.on('close', (code) => {
+      if (code === 0) resolve()
+      else reject(httpErr(500, `${cmd} 退出码 ${code}\n${errTail.slice(-1200)}`))
+    })
+  })
 }
 
-export function createTranscriptJob(courseId, subId, force = false) {
-  const existing = jobsBySub.get(subId)
-  if (existing && existing.status !== 'error' && !force) return existing
+function runNext() {
+  if (running || queue.length === 0) return
+  const task = queue.shift()
+  running = true
+  runTask(task)
+}
 
-  // 之前成功过的任务直接从磁盘恢复（后端重启后不重跑）
-  const dir = path.join(WORKDIR, `${courseId}_${subId}`)
-  if (!force) {
-    try {
-      const saved = JSON.parse(fs.readFileSync(path.join(dir, 'job.json'), 'utf-8'))
-      if (saved.status === 'done' && saved.result?.markdown) {
-        jobsBySub.set(subId, saved)
-        jobsById.set(saved.jobId, saved)
-        return saved
-      }
-    } catch {}
+// ---------- 对外 API ----------
+
+/**
+ * 创建（或复用）逐字稿任务。
+ * videoUrl 只从课节缓存解析：缓存未命中且调用方给了 courseId 时先拉一次课节列表落缓存。
+ */
+export async function createTask({ subId, courseId = null, force = false }) {
+  const latestRow = getLatestTaskRowBySub(subId)
+  if (!force && latestRow && latestRow.status !== 'error') {
+    const task = tasksById.get(latestRow.task_id) || restoreTask(latestRow)
+    appendLog(task, '复用已有任务（同一课时幂等）')
+    return publicTask(task, true)
   }
 
-  const job = {
-    jobId: crypto.randomBytes(8).toString('hex'),
-    courseId,
+  let row = getCachedSessionRow(subId)
+  if (!row && courseId) {
+    await fetchCourseSessions(courseId)
+    row = getCachedSessionRow(subId)
+  }
+  if (!row) {
+    throw httpErr(
+      404,
+      `课节 ${subId} 不在本地缓存：请先在课程课节列表页访问一次，或在请求中携带 courseId`
+    )
+  }
+  if (!row.playback_url) throw httpErr(400, '该课节没有回放视频，无法生成逐字稿')
+
+  const task = {
+    taskId: crypto.randomBytes(8).toString('hex'),
     subId,
-    title: '',
+    courseId: row.course_id,
+    title: row.title,
+    videoUrl: row.playback_url,
+    logs: '',
+    stepId: '',
     status: 'queued',
-    step: '',
     progress: null,
     detail: '排队等待中（GPU 任务串行）',
     error: null,
+    resultFile: null,
     createdAt: Date.now(),
     finishedAt: null,
     result: null,
   }
-  jobsBySub.set(subId, job)
-  jobsById.set(job.jobId, job)
-  persist(job)
-  queue.push(job)
+  tasksById.set(task.taskId, task)
+  saveTask(task, true)
+  appendLog(task, `创建任务：课程 ${row.course_id} 课节 ${subId}`)
+  queue.push(task)
   runNext()
-  return job
+  return publicTask(task, true)
 }
 
-export function getTranscriptJob(jobId) {
-  return jobsById.get(jobId) || null
+export function getTask(taskId) {
+  const task = tasksById.get(taskId) || (getTaskRow(taskId) ? restoreTask(getTaskRow(taskId)) : null)
+  return task ? publicTask(task, true) : null
+}
+
+export function listTasks() {
+  return listTaskRows().map((row) => publicTask(restoreTask(row), false))
 }

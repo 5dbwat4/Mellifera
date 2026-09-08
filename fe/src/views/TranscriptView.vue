@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { api, describeApiError, type TranscriptJob } from '../api'
+import { api, describeApiError, taskEventsUrl, type Task } from '../api'
 
 const route = useRoute()
 
@@ -21,15 +21,15 @@ const STEP_LABELS: Record<string, string> = {
   done: '完成',
 }
 
-const job = ref<TranscriptJob | null>(null)
+const job = ref<Task | null>(null)
 const error = ref('')
-let timer: ReturnType<typeof setInterval> | null = null
+let es: EventSource | null = null
 
 const running = computed(() => job.value?.status === 'queued' || job.value?.status === 'running')
 
 const stepText = computed(() => {
   if (!job.value) return ''
-  const label = STEP_LABELS[job.value.step] || job.value.step
+  const label = STEP_LABELS[job.value.stepId] || job.value.stepId
   if (job.value.progress && job.value.progress.total > 0) {
     return `${label}：${job.value.progress.done} / ${job.value.progress.total}`
   }
@@ -45,29 +45,53 @@ const percent = computed(() => {
 // 极简 Markdown 渲染：##/### 标题、- 列表、其余按段落
 const mdLines = computed(() => (job.value?.result?.markdown || '').split('\n'))
 
-function stopPolling() {
-  if (timer) {
-    clearInterval(timer)
-    timer = null
+function closeSse() {
+  if (es) {
+    es.close()
+    es = null
   }
 }
 
-async function poll() {
-  if (!job.value) return
-  try {
-    job.value = await api.getTranscript(job.value.jobId)
-    if (!running.value) stopPolling()
-  } catch {
-    // 轮询偶发失败忽略，下个周期重试
+// 订阅任务的 SSE 事件流：连上即收当前状态，此后每次变化推一条，
+// 任务进入终态后服务端会主动关闭流
+function listen() {
+  closeSse()
+  es = new EventSource(taskEventsUrl(job.value!.taskId))
+  let failures = 0
+  es.onopen = () => {
+    failures = 0
+  }
+  es.onmessage = (ev) => {
+    try {
+      job.value = JSON.parse(ev.data) as Task
+    } catch {
+      return
+    }
+    if (job.value.status === 'done' || job.value.status === 'error') closeSse()
+  }
+  es.onerror = () => {
+    // 后端重启/网络抖动时 EventSource 会自动重连；连续失败则拉快照兜底
+    failures++
+    if (failures >= 3) {
+      closeSse()
+      api
+        .getTask(job.value!.taskId)
+        .then((t) => {
+          job.value = t
+        })
+        .catch(() => {
+          error.value = '与任务的实时连接已中断，请刷新页面重试'
+        })
+    }
   }
 }
 
 async function start(force = false) {
   error.value = ''
-  stopPolling()
+  closeSse()
   try {
-    job.value = await api.createTranscript(courseId, subId, force)
-    if (running.value) timer = setInterval(poll, 4000)
+    job.value = await api.createTask(subId, courseId, force)
+    if (running.value) listen()
   } catch (e) {
     error.value = describeApiError(e, '创建逐字稿任务失败')
   }
@@ -75,7 +99,7 @@ async function start(force = false) {
 
 start()
 
-onUnmounted(stopPolling)
+onUnmounted(closeSse)
 </script>
 
 <template>
@@ -113,6 +137,11 @@ onUnmounted(stopPolling)
         <div v-if="percent !== null" class="mx-auto mt-4 h-2 max-w-md overflow-hidden rounded-full bg-indigo-100">
           <div class="h-full rounded-full bg-indigo-500 transition-all" :style="{ width: percent + '%' }" />
         </div>
+        <pre
+          v-if="job.logs"
+          class="mx-auto mt-4 max-h-44 w-full max-w-2xl overflow-auto whitespace-pre-wrap rounded-lg bg-white/80 p-3 text-left text-xs leading-relaxed text-gray-600"
+          >{{ job.logs }}</pre
+        >
         <p class="mt-4 text-xs text-indigo-400">
           整段流程约需 20 分钟（视频下载与逐段识别耗时最长），页面可停留等待，也可以稍后回来。
         </p>

@@ -5,7 +5,7 @@ import { config } from './config.js'
 import coursesRouter from './routes/courses.js'
 import healthRouter from './routes/health.js'
 import itemsRouter from './routes/items.js'
-import transcriptsRouter from './routes/transcripts.js'
+import tasksRouter from './routes/tasks.js'
 
 export function createApp() {
   const app = express()
@@ -16,7 +16,7 @@ export function createApp() {
   app.use('/api/health', healthRouter)
   app.use('/api/items', itemsRouter)
   app.use('/api/courses', coursesRouter)
-  app.use('/api/transcripts', transcriptsRouter)
+  app.use('/api/tasks', tasksRouter)
 
   app.use((req, res) => {
     res.status(404).json({ detail: `Not Found: ${req.method} ${req.originalUrl}` })

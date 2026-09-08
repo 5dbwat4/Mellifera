@@ -22,19 +22,32 @@ export interface CourseSession {
   playbackUrl: string | null
 }
 
-export interface TranscriptJob {
-  jobId: string
-  courseId: number
+export interface TaskProgress {
+  done: number
+  total: number
+}
+
+export interface TaskResult {
+  markdown: string
+  blocksCount: number
+  pptCount: number
+}
+
+export interface Task {
+  taskId: string
   subId: number
+  courseId: number | null
   title: string
+  videoUrl: string | null
   status: 'queued' | 'running' | 'done' | 'error'
-  step: string
-  progress: { done: number; total: number } | null
+  stepId: string
   detail: string
+  progress: TaskProgress | null
   error: string | null
+  logs: string
   createdAt: number
   finishedAt: number | null
-  result: { markdown: string; blocksCount: number; pptCount: number } | null
+  result: TaskResult | null
 }
 
 export interface Paged<T> {
@@ -94,12 +107,12 @@ export const api = {
     request<{ courseId: number; total: number; items: CourseSession[] }>(
       `/courses/${courseId}/sessions`
     ),
-  createTranscript: (courseId: number, subId: number, force = false) =>
-    request<TranscriptJob>('/transcripts', {
+  createTask: (subId: number, courseId?: number | null, force = false) =>
+    request<Task>('/tasks', {
       method: 'POST',
-      body: JSON.stringify({ courseId, subId, force }),
+      body: JSON.stringify({ subId, courseId, force }),
     }),
-  getTranscript: (jobId: string) => request<TranscriptJob>(`/transcripts/${jobId}`),
+  getTask: (taskId: string) => request<Task>(`/tasks/${taskId}`),
 }
 
 /** 把 ApiError 翻译成用户能看懂的提示 */
@@ -110,3 +123,7 @@ export function describeApiError(e: unknown, fallback: string): string {
   }
   return fallback
 }
+
+/** 任务实时事件流地址（交给 EventSource） */
+export const taskEventsUrl = (taskId: string) =>
+  `${import.meta.env.BASE_URL}api/tasks/${taskId}/events`

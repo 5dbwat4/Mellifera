@@ -67,8 +67,10 @@ npm run dev
 | DELETE | `/api/items/{id}` | 删除，不存在返回 404 |
 | GET | `/api/courses?page=1&pageSize=9` | 我的智云课堂课程（`force_mycourse=1`），分页透传平台原生参数 |
 | GET | `/api/courses/{courseId}/sessions` | 课节列表（按开课时间倒序，含回放地址）；**不限于自己的课程**，智云课堂存在的课程编号即可查 |
-| POST | `/api/transcripts` | 创建逐字稿任务 `{ courseId, subId, force? }`，同一课时幂等；任务串行排队 |
-| GET | `/api/transcripts/{jobId}` | 查询任务状态/进度/结果 |
+| POST | `/api/tasks` | 创建/复用逐字稿任务 `{ subId, courseId?, force? }`；videoURL 从课节缓存解析（未缓存且带 courseId 时先拉课节落缓存）；同一课时幂等；返回任务 JSON，SSE 流地址为 `/api/tasks/{taskId}/events` |
+| GET | `/api/tasks` | 任务列表（最近 200 条，不含逐字稿正文） |
+| GET | `/api/tasks/{taskId}` | 任务快照（非流式兜底） |
+| GET | `/api/tasks/{taskId}/events` | SSE 实时进度流：连接即推当前状态，之后每次变化推一条，终态后关闭；任务信息持久化在 SQLite（tasks 表：taskId/subId/videoUrl/logs/stepId/resultFile 等） |
 
 ## 逐字稿生成流水线
 

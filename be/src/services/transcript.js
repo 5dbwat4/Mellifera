@@ -409,6 +409,32 @@ export async function createTask({ subId, courseId = null, force = false }) {
   }
   if (!row.playback_url) throw httpErr(400, '该课节没有回放视频，无法生成逐字稿')
 
+  // 磁盘上已有该课时的成品（历史运行产物）→ 登记为 done 任务直接返回，不重跑
+  const existingMd = path.join(WORKDIR, `${row.course_id}_${subId}`, 'transcript_final.md')
+  if (!force && fs.existsSync(existingMd)) {
+    const task = {
+      taskId: crypto.randomBytes(8).toString('hex'),
+      subId,
+      courseId: row.course_id,
+      title: row.title,
+      videoUrl: row.playback_url,
+      logs: '',
+      stepId: 'done',
+      status: 'done',
+      progress: null,
+      detail: '完成（复用已有产物）',
+      error: null,
+      resultFile: existingMd,
+      createdAt: Date.now(),
+      finishedAt: Date.now(),
+      result: null,
+    }
+    tasksById.set(task.taskId, task)
+    saveTask(task, true)
+    appendLog(task, '发现已有逐字稿产物，直接返回')
+    return publicTask(task, true)
+  }
+
   const task = {
     taskId: crypto.randomBytes(8).toString('hex'),
     subId,

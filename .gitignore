@@ -9,3 +9,6 @@ be/tmp/
 
 # Misc
 .DS_Store
+
+# Local-only notes
+CONNECT.md

@@ -67,6 +67,9 @@ npm run dev
 | DELETE | `/api/items/{id}` | 删除，不存在返回 404 |
 | GET | `/api/courses?page=1&pageSize=9` | 我的智云课堂课程（`force_mycourse=1`），分页透传平台原生参数 |
 | GET | `/api/courses/{courseId}/sessions` | 课节列表（按开课时间倒序，含回放地址）；**不限于自己的课程**，智云课堂存在的课程编号即可查 |
+| GET | `/api/courses/{courseId}/sessions/{subId}` | 课时详情（标题、开课时间、回放地址）；先查本地缓存，未命中再拉课节目录 |
+| GET | `/api/courses/{courseId}/sessions/{subId}/ppt` | 课时 PPT 截图列表（按出现时间升序） |
+| GET | `/api/courses/{courseId}/sessions/{subId}/subtitle` | 课时官方字幕规模（条数 + 归一化净字数） |
 | POST | `/api/tasks` | 创建/复用逐字稿任务 `{ subId, courseId?, force? }`；videoURL 从课节缓存解析（未缓存且带 courseId 时先拉课节落缓存）；同一课时幂等；返回任务 JSON，SSE 流地址为 `/api/tasks/{taskId}/events` |
 | GET | `/api/tasks` | 任务列表（最近 200 条，不含逐字稿正文） |
 | GET | `/api/tasks/{taskId}` | 任务快照（非流式兜底） |

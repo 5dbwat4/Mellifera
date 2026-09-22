@@ -2,6 +2,7 @@
 import { computed, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { api, describeApiError, taskEventsUrl, type Task } from '../api'
+import { stepText as formatStep } from '../taskSteps'
 
 const route = useRoute()
 
@@ -9,17 +10,6 @@ const courseId = Number(route.params.courseId)
 const subId = Number(route.params.subId)
 const courseTitle = (history.state?.courseTitle as string) || `课程 ${courseId}`
 const sessionTitle = (history.state?.sessionTitle as string) || ''
-
-const STEP_LABELS: Record<string, string> = {
-  meta: '解析课时信息',
-  download: '下载回放视频',
-  audio: '抽取音频',
-  asr: '语音识别（VAD 切段 + 逐段转写）',
-  punc: '合并分句 + 标点恢复',
-  ppt: '获取并筛选 PPT',
-  llm: '大模型生成逐字稿',
-  done: '完成',
-}
 
 const job = ref<Task | null>(null)
 const error = ref('')
@@ -31,11 +21,7 @@ const running = computed(() => job.value?.status === 'queued' || job.value?.stat
 
 const stepText = computed(() => {
   if (!job.value) return ''
-  const label = STEP_LABELS[job.value.stepId] || job.value.stepId
-  if (job.value.progress && job.value.progress.total > 0) {
-    return `${label}：${job.value.progress.done} / ${job.value.progress.total}`
-  }
-  return label
+  return formatStep(job.value.stepId, job.value.progress)
 })
 
 const percent = computed(() => {
@@ -87,6 +73,78 @@ async function start(force = false) {
   }
 }
 
+async function pause() {
+  if (!job.value) return
+  try {
+    job.value = await api.pauseTask(job.value.taskId)
+  } catch (e) {
+    error.value = describeApiError(e, '暂停任务失败')
+  }
+}
+
+async function resume() {
+  error.value = ''
+  try {
+    job.value = await api.resumeTask(job.value!.taskId)
+    if (running.value) listen()
+  } catch (e) {
+    error.value = describeApiError(e, '恢复任务失败')
+  }
+}
+
+// ---------- 过程数据（懒加载，展开时才请求） ----------
+type ArtifactState = { loading: boolean; error: string; content: string | null }
+const ARTIFACT_LIST = [
+  { name: 'asr_raw', label: 'ASR 原始分段（asr_all.jsonl）' },
+  { name: 'blocks', label: 'ASR 文本块（滤碎合并+标点后）' },
+  { name: 'classroom', label: 'classroom 课节目录原始响应' },
+]
+const artifacts = ref<Record<string, ArtifactState>>({})
+const openArtifact = ref<string | null>(null)
+
+const mmss2 = (sec: number) => {
+  const s = Math.max(0, Math.floor(sec))
+  return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
+}
+
+// blocks 渲染成可读的时间戳行，classroom 原始 JSON 格式化缩进，asr_raw 保持原样
+function fmtArtifact(name: string, content: string): string {
+  if (name === 'blocks') {
+    try {
+      return (JSON.parse(content) as { start: number; end: number; text: string }[])
+        .map((b) => `[${mmss2(b.start)} - ${mmss2(b.end)}] ${b.text}`)
+        .join('\n')
+    } catch {
+      return content
+    }
+  }
+  if (name === 'classroom') {
+    try {
+      return JSON.stringify(JSON.parse(content), null, 2)
+    } catch {
+      return content
+    }
+  }
+  return content
+}
+
+async function toggleArtifact(name: string) {
+  if (openArtifact.value === name) {
+    openArtifact.value = null
+    return
+  }
+  openArtifact.value = name
+  const st = artifacts.value[name]
+  if (st && (st.content !== null || st.loading)) return
+  artifacts.value[name] = { loading: true, error: '', content: null }
+  try {
+    const a = await api.getTaskArtifact(job.value!.taskId, name)
+    artifacts.value[name] = { loading: false, error: '', content: fmtArtifact(name, a.content) }
+  } catch (e) {
+    artifacts.value[name] = { loading: false, error: describeApiError(e, '加载失败'), content: null }
+  }
+}
+
 start()
 
 onUnmounted(closeSse)
@@ -102,10 +160,10 @@ onUnmounted(closeSse)
         <p class="mt-1 text-sm text-gray-500">{{ courseTitle }} · 课时编号 {{ subId }}</p>
       </div>
       <RouterLink
-        :to="{ path: `/courses/${courseId}`, state: { courseTitle } }"
+        :to="{ path: `/courses/${courseId}/sessions/${subId}`, state: { courseTitle, sessionTitle } }"
         class="rounded-lg bg-white px-3 py-1.5 text-sm font-medium text-gray-700 ring-1 ring-gray-200 transition hover:bg-gray-50"
       >
-        ← 返回课节列表
+        ← 返回课时详情
       </RouterLink>
     </div>
 
@@ -138,6 +196,32 @@ onUnmounted(closeSse)
         <p class="mt-4 text-xs text-indigo-400">
           整段流程约需 20 分钟（视频下载与逐段识别耗时最长），页面可停留等待，也可以稍后回来。
         </p>
+        <button
+          class="mt-3 rounded-lg bg-white px-3 py-1.5 text-xs font-medium text-gray-600 ring-1 ring-indigo-200 transition hover:bg-indigo-50"
+          @click="pause"
+        >
+          暂停任务
+        </button>
+      </div>
+
+      <!-- 已暂停（等待 sglang 或手动暂停） -->
+      <div
+        v-else-if="job.status === 'paused'"
+        class="rounded-2xl border border-amber-100 bg-amber-50 p-8 text-center"
+      >
+        <p class="font-medium text-amber-900">任务已暂停</p>
+        <p class="mt-1 text-sm text-amber-600">{{ job.detail }}</p>
+        <pre
+          v-if="job.logs"
+          class="mx-auto mt-4 max-h-44 w-full max-w-2xl overflow-auto whitespace-pre-wrap rounded-lg bg-white/80 p-3 text-left text-xs leading-relaxed text-gray-600"
+          >{{ job.logs }}</pre
+        >
+        <button
+          class="mt-4 rounded-lg bg-amber-500 px-4 py-1.5 text-sm font-medium text-white transition hover:bg-amber-600"
+          @click="resume"
+        >
+          继续
+        </button>
       </div>
 
       <!-- 失败 -->
@@ -181,6 +265,34 @@ onUnmounted(closeSse)
           </template>
         </article>
       </template>
+
+      <!-- 过程数据 -->
+      <div class="mt-4 rounded-2xl border border-gray-200 bg-white">
+        <p class="border-b border-gray-100 px-4 py-3 text-sm font-medium text-gray-700">过程数据</p>
+        <div v-for="a in ARTIFACT_LIST" :key="a.name" class="border-b border-gray-100 last:border-0">
+          <button
+            class="flex w-full items-center justify-between px-4 py-2.5 text-left text-sm text-gray-600 transition hover:bg-gray-50"
+            @click="toggleArtifact(a.name)"
+          >
+            <span>{{ a.label }}</span>
+            <span class="text-xs text-gray-400">{{ openArtifact === a.name ? '收起 ▲' : '展开 ▼' }}</span>
+          </button>
+          <div v-if="openArtifact === a.name" class="px-4 pb-3">
+            <p v-if="artifacts[a.name]?.loading" class="py-4 text-center text-xs text-gray-400">加载中…</p>
+            <p
+              v-else-if="artifacts[a.name]?.error"
+              class="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600"
+            >
+              {{ artifacts[a.name].error }}
+            </p>
+            <pre
+              v-else
+              class="max-h-96 overflow-auto whitespace-pre-wrap rounded-lg bg-gray-50 p-3 text-xs leading-relaxed text-gray-700"
+              >{{ artifacts[a.name]?.content }}</pre
+            >
+          </div>
+        </div>
+      </div>
     </template>
   </section>
 </template>

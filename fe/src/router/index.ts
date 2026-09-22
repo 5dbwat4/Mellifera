@@ -24,6 +24,12 @@ const router = createRouter({
     },
     {
       path: '/courses/:courseId/sessions/:subId',
+      name: 'session-detail',
+      component: () => import('../views/SessionDetail.vue'),
+      meta: { title: '课时详情' },
+    },
+    {
+      path: '/courses/:courseId/sessions/:subId/task',
       name: 'session-transcript',
       component: () => import('../views/TranscriptView.vue'),
       meta: { title: '逐字稿' },

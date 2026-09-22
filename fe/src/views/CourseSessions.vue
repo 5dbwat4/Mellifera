@@ -121,7 +121,7 @@ onMounted(() => {
             class="rounded-lg px-3 py-1 text-xs font-medium text-white transition hover:bg-emerald-600 bg-emerald-500"
             @click="openTranscript(s)"
           >
-            生成逐字稿
+            课时详情
           </button>
         </div>
       </li>

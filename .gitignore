@@ -10,6 +10,11 @@ be/tmp/
 # Local sqlite cache
 be/data/
 
+# Diagnostics / scratch
+.sglang_diag/
+_tmp_*
+*.tmp.*
+
 # Misc
 .DS_Store
 

@@ -22,6 +22,24 @@ export interface CourseSession {
   playbackUrl: string | null
 }
 
+export interface SessionDetail extends CourseSession {
+  courseId: number
+}
+
+export interface PptItem {
+  url: string
+  /** 该 PPT 出现的秒数 */
+  sec: number
+}
+
+export interface SubtitleInfo {
+  subId: number
+  /** 官方字幕条数 */
+  total: number
+  /** 官方字幕归一化净字数 */
+  charCount: number
+}
+
 export interface TaskProgress {
   done: number
   total: number
@@ -39,7 +57,7 @@ export interface Task {
   courseId: number | null
   title: string
   videoUrl: string | null
-  status: 'queued' | 'running' | 'done' | 'error'
+  status: 'queued' | 'running' | 'paused' | 'done' | 'error'
   stepId: string
   detail: string
   progress: TaskProgress | null
@@ -107,12 +125,25 @@ export const api = {
     request<{ courseId: number; total: number; items: CourseSession[] }>(
       `/courses/${courseId}/sessions`
     ),
+  getSession: (courseId: number, subId: number) =>
+    request<SessionDetail>(`/courses/${courseId}/sessions/${subId}`),
+  getSessionPpt: (courseId: number, subId: number) =>
+    request<{ courseId: number; subId: number; total: number; items: PptItem[] }>(
+      `/courses/${courseId}/sessions/${subId}/ppt`
+    ),
+  getSessionSubtitle: (courseId: number, subId: number) =>
+    request<SubtitleInfo>(`/courses/${courseId}/sessions/${subId}/subtitle`),
   createTask: (subId: number, courseId?: number | null, force = false) =>
     request<Task>('/tasks', {
       method: 'POST',
       body: JSON.stringify({ subId, courseId, force }),
     }),
   getTask: (taskId: string) => request<Task>(`/tasks/${taskId}`),
+  listTasks: () => request<Task[]>('/tasks'),
+  pauseTask: (taskId: string) => request<Task>(`/tasks/${taskId}/pause`, { method: 'POST' }),
+  resumeTask: (taskId: string) => request<Task>(`/tasks/${taskId}/resume`, { method: 'POST' }),
+  getTaskArtifact: (taskId: string, name: string) =>
+    request<{ name: string; kind: string; content: string }>(`/tasks/${taskId}/artifacts/${name}`),
 }
 
 /** 把 ApiError 翻译成用户能看懂的提示 */

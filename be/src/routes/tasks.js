@@ -1,6 +1,6 @@
 import { Router } from 'express'
 
-import { createTask, getTask, listTasks, subscribe, unsubscribe } from '../services/transcript.js'
+import { createTask, getTask, getTaskArtifact, listTasks, pauseById, resumeById, subscribe, unsubscribe } from '../services/transcript.js'
 
 const router = Router()
 
@@ -36,6 +36,33 @@ router.get('/:taskId', (req, res) => {
     return
   }
   res.json(task)
+})
+
+// 暂停：排队中直接摘除；运行中终止当前子进程，从断点可恢复
+router.post('/:taskId/pause', (req, res, next) => {
+  try {
+    res.json(pauseById(req.params.taskId))
+  } catch (e) {
+    next(e)
+  }
+})
+
+// 恢复：暂停的任务重新入队，流水线从头重入（已完成阶段靠缓存跳过）
+router.post('/:taskId/resume', (req, res, next) => {
+  try {
+    res.json(resumeById(req.params.taskId))
+  } catch (e) {
+    next(e)
+  }
+})
+
+// 过程性数据：asr_raw（ASR 原稿）/ blocks（文本块）/ classroom（课节目录原始响应）
+router.get('/:taskId/artifacts/:name', async (req, res, next) => {
+  try {
+    res.json(await getTaskArtifact(req.params.taskId, req.params.name))
+  } catch (e) {
+    next(e)
+  }
 })
 
 // SSE 实时事件流：连上先推当前状态，之后每次状态变化推一条；

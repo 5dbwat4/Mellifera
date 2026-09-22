@@ -2,12 +2,13 @@ import fs from 'node:fs'
 
 import { CLASSROOM, ZJUAM } from 'login-zju'
 
-import { cacheSessions, getCachedSessions } from '../db.js'
+import { cacheSessions, getCachedSessionRow, getCachedSessions } from '../db.js'
 
 // 智云课堂接口（用法与 ZJU-live-better/classroom.zju 一致）
 const COURSE_LIST_URL =
   'https://education.cmc.zju.edu.cn/personal/courseapi/vlabpassportapi/v1/account-profile/course'
 const CATALOGUE_URL = 'https://yjapi.cmc.zju.edu.cn/courseapi/v2/course/catalogue'
+const SUBTITLE_URL = 'https://yjapi.cmc.zju.edu.cn/courseapi/v3/web-socket/search-trans-result'
 
 let client = null
 
@@ -108,6 +109,34 @@ export async function fetchCourseSessions(courseId) {
   return { courseId, total: items.length, items }
 }
 
+// 课节目录接口的原始 JSON（过程数据留档用；与 fetchCourseSessions 同一地址同一登录态）
+export function fetchCourseSessionsRaw(courseId) {
+  return authedJson(`${CATALOGUE_URL}?course_id=${courseId}`)
+}
+
+// 单个课节信息：先查本地缓存，未命中再拉一次课节目录（并顺带落缓存）
+export async function fetchSession(courseId, subId) {
+  const cached = getCachedSessionRow(subId)
+  if (cached && Number(cached.course_id) === courseId) {
+    return {
+      subId: Number(cached.sub_id),
+      courseId: Number(cached.course_id),
+      title: cached.title,
+      startAt: cached.start_at,
+      status: String(cached.status ?? ''),
+      playbackUrl: cached.playback_url,
+    }
+  }
+  const { items } = await fetchCourseSessions(courseId)
+  const found = items.find((s) => s.subId === subId)
+  if (!found) {
+    const err = new Error(`课程 ${courseId} 下没有课节 ${subId}`)
+    err.status = 404
+    throw err
+  }
+  return { ...found, courseId }
+}
+
 // 课节的 PPT 截图列表（按出现时间升序）
 export async function fetchSessionPpt(courseId, subId) {
   const url = `https://classroom.zju.edu.cn/pptnote/v1/schedule/search-ppt?course_id=${courseId}&sub_id=${subId}`
@@ -121,6 +150,28 @@ export async function fetchSessionPpt(courseId, subId) {
     if (content.pptimgurl) list.push({ url: content.pptimgurl, sec: Number(item.created_sec || 0) })
   }
   return list.sort((a, b) => a.sec - b.sec)
+}
+
+// 官方字幕（智云课堂 search-trans-result）归一化后的净字数：
+// 去掉空白与中英文标点，与 scripts/compare_asr.js 的口径保持一致
+const stripPunct = (s) => s.replace(/[\s，。、；：？！,.:;?!“”‘’"'"()（）[\]【】《》<>…—·\-～~]/g, '')
+
+// 课节官方字幕：返回条数与归一化字数（不返回正文，详情页只展示规模）
+export async function fetchSessionSubtitle(subId) {
+  const res = await authedJson(`${SUBTITLE_URL}?sub_id=${subId}&format=json`)
+  const items = []
+  for (const item of res.list || []) {
+    for (const c of item.all_content || []) {
+      const text = String(c.Text || '').trim()
+      if (text) items.push({ sec: Number(c.BeginSec || 0), text })
+    }
+  }
+  items.sort((a, b) => a.sec - b.sec)
+  return {
+    subId,
+    total: items.length,
+    charCount: stripPunct(items.map((i) => i.text).join('')).length,
+  }
 }
 
 // 走登录态下载资源（PPT 截图等需要 Cookie 的地址），返回字节数
